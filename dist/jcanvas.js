@@ -493,6 +493,8 @@ function _getCanvasData(canvas) {
 					names: {},
 					groups: {}
 				},
+				// Tween array
+				tweens: [],
 				eventHooks: {},
 				// All layers that intersect with the event coordinates (regardless of visibility)
 				intersecting: [],
@@ -1461,6 +1463,7 @@ $.fn.drawLayers = function drawLayers(args) {
 		// Other variables
 		layers, layer, lastLayer, l, index, lastIndex,
 		data, eventCache, eventType, isImageLayer;
+	var currentTime, remaining, temp, percent;
 
 	// The layer index from which to start redrawing the canvas
 	index = params.index;
@@ -1500,6 +1503,31 @@ $.fn.drawLayers = function drawLayers(args) {
 				// Prevent any one event from firing excessively
 				if (params.resetFire) {
 					layer._fired = false;
+				}
+				// check if tweening
+				if(layer.name && data.tweens[layer.name]){
+					var tweenOptions = data.tweens[layer.name]['options'];
+
+					currentTime = Date.now();
+					remaining = Math.max( 0, tweenOptions['startTime'] + tweenOptions['duration'] - currentTime );
+					temp = remaining / tweenOptions['duration'] || 0;
+					percent = 1 - temp;
+
+					// console.log(percent);
+					if(percent == 1){
+						// call the complete
+						data.tweens[layer.name] = undefined;
+					}else{
+						var length = data.tweens[layer.name]['tweens'].length;
+						for (var i = 0; i < length; i++) {
+							data.tweens[layer.name]['tweens'][i].run(percent);
+						}
+					}					
+
+				}
+				// call the tick function to update the layer
+				if(layer.paused !== true && layer.tick && isFunction(layer.tick)){
+					layer.tick(layer);
 				}
 				// Draw layer
 				_drawLayer($canvas, ctx, layer, l + 1);
@@ -1907,6 +1935,212 @@ function _animateColor(fx) {
 	}
 }
 
+function _createTween(data,name,elem,props,options){
+
+	var propName;
+
+	if(data.tweens[name] == undefined){
+		data.tweens[name] = [];
+		data.tweens[name]['tweens'] = [];
+		data.tweens[name]['options'] = [];
+		data.tweens[name]['options']['startTime'] = Date.now();
+		data.tweens[name]['options']['duration'] = options.duration;
+	}
+
+	for (propName in props) {
+		var tween = $.Tween(elem,options,propName,props[propName],options.easing);
+		data.tweens[name]['tweens'].push(tween);
+	}
+
+	return data.tweens[name];
+}
+
+$.fn.tweenLayer = function tweenLayer() {
+	var $canvases = this, $canvas, e, ctx,
+		args = arraySlice.call(arguments, 0),
+		data, layer, props;
+
+	// Deal with all cases of argument placement
+	/*
+		0. layer name/index
+		1. properties
+		2. duration/options
+		3. easing
+		4. complete function
+		5. step function
+	*/
+
+	if (typeOf(args[2]) === 'object') {
+
+		// Accept an options object for animation
+		args.splice(2, 0, args[2].duration || null);
+		args.splice(3, 0, args[3].easing || null);
+		args.splice(4, 0, args[4].complete || null);
+		args.splice(5, 0, args[5].step || null);
+
+	} else {
+
+		if (args[2] === undefined) {
+			// If object is the last argument
+			args.splice(2, 0, null);
+			args.splice(3, 0, null);
+			args.splice(4, 0, null);
+		} else if (isFunction(args[2])) {
+			// If callback comes after object
+			args.splice(2, 0, null);
+			args.splice(3, 0, null);
+		}
+		if (args[3] === undefined) {
+			// If duration is the last argument
+			args[3] = null;
+			args.splice(4, 0, null);
+		} else if (isFunction(args[3])) {
+			// If callback comes after duration
+			args.splice(3, 0, null);
+		}
+
+	}
+
+	// Run callback function when animation completes
+	function complete($canvas, data, layer) {
+
+		return function () {
+
+			_showProps(layer);
+			_removeSubPropAliases(layer);
+
+			// Prevent multiple redraw loops
+			if (!data.tweening || data.tweened === layer) {
+				// Redraw layers on last frame
+				// 不用渲染
+				$canvas.drawLayers();
+			}
+
+			// Signify the end of an animation loop
+			layer._tweening = false;
+			data.tweening = false;
+			data.tweened = null;
+
+			// If callback is defined
+			if (args[4] && isFunction(args[4])) {
+				// Run callback at the end of the animation
+				args[4].call($canvas[0], layer);
+			}
+
+			_triggerLayerEvent($canvas, data, layer, 'tweened');
+
+		};
+
+	}
+
+	// Redraw layers on every frame of the animation
+	function step($canvas, data, layer) {
+
+		return function (now, fx) {
+
+			var parts, propName, subPropName,
+				hidden = false;
+
+			// If animated property has been hidden
+			if (fx.prop[0] === '_') {
+				hidden = true;
+				// Unhide property temporarily
+				fx.prop = fx.prop.replace('_', '');
+				layer[fx.prop] = layer['_' + fx.prop];
+			}
+
+			// If animating property of sub-object
+			if (fx.prop.indexOf('.') !== -1) {
+				parts = fx.prop.split('.');
+				propName = parts[0];
+				subPropName = parts[1];
+				if (layer[propName]) {
+					layer[propName][subPropName] = fx.now;
+				}
+			}
+
+			// Throttle animation to improve efficiency
+			if (layer._pos !== fx.pos) {
+
+				layer._pos = fx.pos;
+
+				// Signify the start of an animation loop
+				if (!layer._tweening && !data.tweening) {
+					layer._tweening = true;
+					data.tweening = true;
+					data.tweened = layer;
+				}
+
+				// Prevent multiple redraw loops
+				if (!data.tweening || data.tweened === layer) {
+					// Redraw layers for every frame
+					// 不用渲染
+					// $canvas.drawLayer(args[0]);
+				}
+
+			}
+
+			// If callback is defined
+			if (args[5] && isFunction(args[5])) {
+				// Run callback for each step of animation
+				args[5].call($canvas[0], now, fx, layer);
+			}
+
+			_triggerLayerEvent($canvas, data, layer, 'tween', fx);
+
+			// If property should be hidden during animation
+			if (hidden) {
+				// Hide property again
+				fx.prop = '_' + fx.prop;
+			}
+
+		};
+
+	}
+
+	for (e = 0; e < $canvases.length; e += 1) {
+		$canvas = $($canvases[e]);
+		ctx = _getContext($canvases[e]);
+		if (ctx) {
+
+			data = _getCanvasData($canvases[e]);
+
+			// If a layer object was passed, use it the layer to be animated
+			layer = $canvas.getLayer(args[0]);
+
+			// Ignore layers that are functions
+			if (layer && layer._method !== $.fn.draw) {
+
+				// Do not modify original object
+				props = extendObject({}, args[1]);
+
+				props = _parseEndValues($canvases[e], layer, props);
+
+				// Bypass jQuery CSS Hooks for CSS properties (width, opacity, etc.)
+				_hideProps(props, true);
+				_hideProps(layer);
+
+				// Fix for jQuery's vendor prefixing support, which affects how width/height/opacity are animated
+				layer.style = css.propsObj;
+
+				_createTween(data,args[0],layer,props,{
+					duration: args[2],
+					easing: ($.easing[args[3]] ? args[3] : null),
+					// When animation completes
+					complete: complete($canvas, data, layer),
+					// Redraw canvas for every animation frame
+					step: step($canvas, data, layer)
+				});
+
+				_triggerLayerEvent($canvas, data, layer, 'tweenstart');
+
+			}
+
+		}
+	}
+	return $canvases;
+};
+
 // Animate jCanvas layer
 $.fn.animateLayer = function animateLayer() {
 	var $canvases = this, $canvas, e, ctx,
@@ -1974,7 +2208,7 @@ $.fn.animateLayer = function animateLayer() {
 			data.animated = null;
 
 			// If callback is defined
-			if (args[4]) {
+			if (args[4] && isFunction(args[4])) {
 				// Run callback at the end of the animation
 				args[4].call($canvas[0], layer);
 			}
@@ -2031,7 +2265,7 @@ $.fn.animateLayer = function animateLayer() {
 			}
 
 			// If callback is defined
-			if (args[5]) {
+			if (args[5] && isFunction(args[5])) {
 				// Run callback for each step of animation
 				args[5].call($canvas[0], now, fx, layer);
 			}
@@ -2197,6 +2431,22 @@ $.fn.stopLayerGroup = function stopLayerGroup(groupId, clearQueue) {
 
 		}
 	}
+	return $canvases;
+};
+
+
+// Render layer
+$.fn.renderLayers = function renderLayers(args) {
+	var $canvases = this, $canvas , e;
+
+	// call tweens
+
+	// draw all layers
+	for (e = 0; e < $canvases.length; e += 1) {
+		$canvas = $($canvases[e]);
+		$canvas.drawLayers(args);
+	}
+	
 	return $canvases;
 };
 
